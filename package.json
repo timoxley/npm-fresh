@@ -1,0 +1,30 @@
+{
+  "name": "npm-fresh",
+  "version": "1.0.0",
+  "description": "Follow npm changes & update local cache.",
+  "main": "index.js",
+  "bin": {
+    "npm-fresh": "index.js",
+    "npmfresh": "index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["cache", "update", "follow", "registry", "changes"],
+  "author": "Tim Oxley <secoif@gmail.com>",
+  "license": "ISC",
+  "dependencies": {
+    "configstore": "~0.3.1",
+    "follow": "~0.11.3",
+    "minimist": "~1.1.0"
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/timoxley/npm-fresh.git"
+  },
+  "bugs": {
+    "url": "https://github.com/timoxley/npm-fresh/issues"
+  },
+  "homepage": "https://github.com/timoxley/npm-fresh"
+}
