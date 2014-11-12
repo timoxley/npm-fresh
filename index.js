@@ -4,12 +4,13 @@
 
 var spawn = require('child_process').spawn
 var exec = require('child_process').exec
+var request = require('request')
 
 var minimist = require('minimist')
 var follow = require('follow')
 var Configstore = require('configstore')
 
-var SKIMDB = "https://skimdb.npmjs.com/registry"
+var SKIMDB = "https://skimdb.npmjs.com/registry/"
 
 var packageName = require('./package').name
 var conf = new Configstore(packageName, {since: 594192})
@@ -39,11 +40,36 @@ var follower = follow({
   inactivity_ms: 1000 * 60 * 60
 }, function(err, change) {
   if (err) return console.error(err)
-  var pkg = {name: change.id}
-  invalidate(pkg, function(err) {
+  request.get({
+    url: SKIMDB + change.id,
+    json: true,
+    headers: {
+      'user-agent': packageName
+    }
+  }, function(err, response, pkgData) {
     if (err) return console.error(err)
-    if (!argv.silent) console.log('%d cleared %s@%s', change.seq, pkg.name, pkg.version || '*')
-    conf.set('since', parseInt(change.seq))
+    if (!pkgData) return
+    var pkg = {name: change.id}
+    var version = pkgData['dist-tags'] && pkgData['dist-tags'].latest
+
+    if (!pkgData['dist-tags']) {
+      // handle deprecation
+      return invalidate(pkg, function(err) {
+        if (err) return console.error(err)
+        if (!argv.silent) console.log('%d invalidated %s@%s', change.seq, pkg.name, pkg.version || '*')
+        conf.set('since', parseInt(change.seq))
+      })
+    }
+
+    pkg.version = version
+    pkg.tarball = pkgData.versions[version].dist.tarball
+    pkg.seq = change.seq
+
+    add(pkg, function(err) {
+      if (err) return console.error(pkg.seq, err)
+      if (!argv.silent) console.log('%d added %s@%s', change.seq, pkg.name, pkg.version || '*')
+      conf.set('since', parseInt(change.seq))
+    })
   })
 })
 
@@ -54,7 +80,29 @@ process
 .on('SIGABRT', shutdown)
 .on('SIGTERM', shutdown)
 
+function add(pkg, done) {
+  if (argv.verbose) console.error('%d adding %s', pkg.seq, pkg.name)
+  var tarball = pkg.tarball
+  var cmd = 'npm'
+  var args = 'cache add '
+  args += pkg.name
+  args += '@' + pkg.version
+  args += ' --silent '
+  spawn(cmd, args.split(' '), {stdio: 'inherit'})
+  .once('error', function(err) {
+    console.error(pkg.seq, err) // ignore err, whatever
+    done(err, tarball)
+    done = noop
+  })
+  .once('exit', function() {
+    done(null, tarball)
+    done = noop
+  })
+}
+
+
 function invalidate(pkg, done) {
+  if (argv.verbose) console.error('%d invalidating %s', pkg.seq, pkg.name)
   var cmd = 'npm'
   var args = 'cache clean '
   args += pkg.name
@@ -62,7 +110,7 @@ function invalidate(pkg, done) {
   args += ' --silent '
   spawn(cmd, args.split(' '), {stdio: 'inherit'})
   .once('error', function(err) {
-    console.error(err) // ignore err, whatever
+    console.error(pkg.seq, err) // ignore err, whatever
     done(err, pkg)
     done = noop
   })

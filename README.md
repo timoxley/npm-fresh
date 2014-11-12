@@ -9,6 +9,7 @@ which it has already downloaded. Only packages which have been updated
 since npm-fresh was started will need to be downloaded.
 
 ```
+# After starting npmfresh, open a new terminal tab.
 > npmfresh --verbose
 following from 594308
 saving current cache-min: 60
