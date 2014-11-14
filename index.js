@@ -5,6 +5,8 @@
 var spawn = require('child_process').spawn
 var exec = require('child_process').exec
 var request = require('request')
+var bl = require('bl')
+var through = require('through2')
 
 var minimist = require('minimist')
 var follow = require('follow')
@@ -34,6 +36,53 @@ if (argv.cachemin) setCacheMin(function(err) {
 
 if (argv.verbose) console.error('following from %d', since)
 
+var queue = through.obj(function(pkg, enc, done) {
+  var self = this
+  pkg.name = pkg.change.id
+  pkg.seq = pkg.change.seq
+  if (argv.verbose) console.log('%d started: %s', pkg.seq, pkg.name)
+  var version = pkg['dist-tags'] && pkg['dist-tags'].latest
+  if (!pkg['dist-tags']) {
+    // handle deprecation
+    return has(pkg, null, function(err, hasPackage) {
+      if (err) return done(err, pkg)
+      if (!hasPackage) return done(err, pkg)
+      invalidate(pkg, function(err) {
+        if (err) return done(err, pkg)
+        if (!argv.silent) console.log('%d invalidated %s@%s', pkg.seq, pkg.name, pkg.version || '*')
+        return done(null, pkg)
+      })
+    })
+  }
+
+  pkg.version = version
+  pkg.tarball = pkg.versions[version].dist.tarball
+  has(pkg, null, function(err, hasPackage) {
+    if (err) return done(err, pkg)
+    if (!hasPackage) return done(err, pkg)
+    add(pkg, function(err, added) {
+      if (err) return done(err, pkg)
+      if (!argv.silent) console.log('%d added %s@%s', pkg.seq, pkg.name, pkg.version || '*')
+      return done(null, pkg)
+    })
+  })
+}).on('error', function(err, pkg) {
+  console.error('error', pkg.seq, err)
+})
+
+queue.pipe(through.obj(function(pkg, enc, done) {
+  if (argv.verbose) console.log('%d finished: %s', pkg.seq, pkg.name)
+  conf.set('since', parseInt(pkg.seq))
+  done()
+}))
+
+
+function inspect(item) { // for debugging
+  console.log(require('util').inspect(item, {colors: true, depth: 30}))
+}
+
+
+
 var follower = follow({
   db: SKIMDB,
   since: parseInt(since) || 'now',
@@ -49,27 +98,8 @@ var follower = follow({
   }, function(err, response, pkgData) {
     if (err) return console.error(err)
     if (!pkgData) return
-    var pkg = {name: change.id}
-    var version = pkgData['dist-tags'] && pkgData['dist-tags'].latest
-
-    if (!pkgData['dist-tags']) {
-      // handle deprecation
-      return invalidate(pkg, function(err) {
-        if (err) return console.error(err)
-        if (!argv.silent) console.log('%d invalidated %s@%s', change.seq, pkg.name, pkg.version || '*')
-        conf.set('since', parseInt(change.seq))
-      })
-    }
-
-    pkg.version = version
-    pkg.tarball = pkgData.versions[version].dist.tarball
-    pkg.seq = change.seq
-
-    add(pkg, function(err) {
-      if (err) return console.error(pkg.seq, err)
-      if (!argv.silent) console.log('%d added %s@%s', change.seq, pkg.name, pkg.version || '*')
-      conf.set('since', parseInt(change.seq))
-    })
+    pkgData.change = change
+    queue.write(pkgData)
   })
 })
 
@@ -81,23 +111,55 @@ process
 .on('SIGTERM', shutdown)
 
 function add(pkg, done) {
-  if (argv.verbose) console.error('%d adding %s', pkg.seq, pkg.name)
+  if (argv.verbose) console.error('%d adding %s@%s', pkg.seq, pkg.name, pkg.version || '*')
   var tarball = pkg.tarball
   var cmd = 'npm'
   var args = 'cache add '
   args += pkg.name
   args += '@' + pkg.version
   args += ' --silent '
-  spawn(cmd, args.split(' '), {stdio: 'inherit'})
+  spawn(cmd, args.split(' '))
   .once('error', function(err) {
-    console.error(pkg.seq, err) // ignore err, whatever
     done(err, tarball)
     done = noop
   })
-  .once('exit', function() {
+  .once('close', function() {
     done(null, tarball)
     done = noop
   })
+}
+
+function has(pkg, version, done) {
+  var cmd = 'npm'
+  var args = 'cache ls '
+  args += pkg.name
+  if (version != null) args += '@' + version
+  args += ' --silent '
+  var hasPackage = null
+  var hasClosed = null
+  var hasError = null
+  spawn(cmd, args.split(' '))
+  .once('error', function(err) {
+    done(err)
+    done = noop
+  })
+  .once('close', function() {
+    hasClosed = true
+    if (hasPackage !== null) {
+      done(null, hasPackage)
+      done = noop
+    }
+  }).stdout.pipe(bl(function(err, stdout) {
+    if (err) return done(err)
+    hasPackage = stdout && stdout.length && !!String(stdout).trim().length
+    if (argv.verbose && hasPackage) {
+      console.error('%d cache has %s@%s', pkg.seq, pkg.name, version || '*')
+    }
+    if (hasClosed !== null) {
+      done(null, hasPackage)
+      done = noop
+    }
+  }))
 }
 
 
@@ -108,13 +170,13 @@ function invalidate(pkg, done) {
   args += pkg.name
   if (pkg.version) args += '@' + version
   args += ' --silent '
-  spawn(cmd, args.split(' '), {stdio: 'inherit'})
+  spawn(cmd, args.split(' '))
   .once('error', function(err) {
     console.error(pkg.seq, err) // ignore err, whatever
     done(err, pkg)
     done = noop
   })
-  .once('exit', function() {
+  .once('close', function() {
     done(null, pkg)
     done = noop
   })
@@ -145,6 +207,7 @@ function unsetCacheMin(done) {
 
 function shutdown() {
   if (argv.verbose) console.error('\nshutting down...')
+  queue.end()
   if (!argv.cachemin) return process.exit()
   unsetCacheMin(function(err) {
     if (err) console.error(err) // ignore err
