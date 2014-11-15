@@ -6,13 +6,18 @@ var spawn = require('child_process').spawn
 var exec = require('child_process').exec
 var request = require('request')
 var bl = require('bl')
+var fs = require('fs')
+var parallel = require('parallel-transform')
 var through = require('through2')
+var untildify = require('untildify')
 
 var minimist = require('minimist')
 var follow = require('follow')
 var Configstore = require('configstore')
+var map = require('map-limit')
 
 var SKIMDB = "https://skimdb.npmjs.com/registry/"
+var NPM_REGISTRY = "https://registry.npmjs.org"
 
 var packageName = require('./package').name
 var conf = new Configstore(packageName, {since: 594192})
@@ -21,7 +26,8 @@ var argv = minimist(process.argv, {
   default: {
     cachemin: true,
     silent: false,
-    verbose: false
+    verbose: false,
+    update: true
   },
   boolean: ['cachemin']
 })
@@ -36,7 +42,8 @@ if (argv.cachemin) setCacheMin(function(err) {
 
 if (argv.verbose) console.error('following from %d', since)
 
-var queue = through.obj(function(pkg, enc, done) {
+
+var queue = parallel(20, function(pkg, done) {
   var self = this
   pkg.name = pkg.change.id
   pkg.seq = pkg.change.seq
@@ -76,32 +83,83 @@ queue.pipe(through.obj(function(pkg, enc, done) {
   done()
 }))
 
+if (argv.update) {
+  updateCache(function(err) {
+    if (err) throw err
+    startFollowing()
+  })
+} else {
+  startFollowing()
+}
 
 function inspect(item) { // for debugging
   console.log(require('util').inspect(item, {colors: true, depth: 30}))
 }
 
-
-
-var follower = follow({
-  db: SKIMDB,
-  since: parseInt(since) || 'now',
-  inactivity_ms: 1000 * 60 * 60
-}, function(err, change) {
-  if (err) return console.error(err)
-  request.get({
-    url: SKIMDB + change.id,
-    json: true,
-    headers: {
-      'user-agent': packageName
-    }
-  }, function(err, response, pkgData) {
-    if (err) return console.error(err)
-    if (!pkgData) return
-    pkgData.change = change
-    queue.write(pkgData)
+function updateCache(fn) {
+  if (argv.verbose) console.error('updating cache')
+  exec('npm cache ls --silent | grep "/package/package\.json$"', function(err, stdout) {
+    if (err) return fn(err)
+    var lines = stdout.trim().split('\n').map(function(line) {return untildify(line.trim())})
+    map(lines, Infinity, function(line, next) {
+      fs.readFile(line, 'utf8', function(err, data) {
+        if (err) return next(err);
+        var pkgJSON = JSON.parse(data)
+        pkgJSON._resolved && pkgJSON._resolved.indexOf(NPM_REGISTRY) === 0
+        ? next(null, pkgJSON)
+        : next()
+      })
+    }, function(err, packages) {
+      if (err) return fn(err)
+      packages = packages || []
+      packages = packages.filter(Boolean)
+      map(packages, 10, function(pkg, next) {
+        request.get({
+          url: SKIMDB + pkg.name,
+          json: true,
+          headers: {
+            'user-agent': packageName
+          }
+        }, function(err, response, pkgData) {
+          if (err) return console.error(err), next();
+          if (!pkgData) return next()
+          pkgData.change = {
+            id: pkg.name,
+            seq: -1
+          }
+          queue.write(pkgData)
+          next(null)
+        })
+      }, function(err) {
+        if (argv.verbose) console.error('queued cache updates.')
+        fn(err)
+      })
+    })
   })
-})
+}
+
+function startFollowing() {
+  var follower = follow({
+    db: SKIMDB,
+    since: parseInt(since) || 'now',
+    inactivity_ms: 1000 * 60 * 60
+  }, function(err, change) {
+    if (err) return console.error(err)
+    request.get({
+      url: SKIMDB + change.id,
+      json: true,
+      headers: {
+        'user-agent': packageName
+      }
+    }, function(err, response, pkgData) {
+      if (err) return console.error(err)
+      if (!pkgData) return
+      pkgData.change = change
+      queue.write(pkgData)
+    })
+  })
+}
+
 
 process
 .on('SIGHUP', shutdown)
