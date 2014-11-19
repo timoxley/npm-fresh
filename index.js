@@ -20,7 +20,7 @@ var SKIMDB = "https://skimdb.npmjs.com/registry/"
 var NPM_REGISTRY = "https://registry.npmjs.org"
 
 var packageName = require('./package').name
-var conf = new Configstore(packageName, {since: 594192})
+var conf = new Configstore(packageName, {since: -1})
 
 var argv = minimist(process.argv, {
   default: {
@@ -63,7 +63,6 @@ var queue = parallel(20, function(pkg, done) {
   }
 
   pkg.version = version
-  pkg.tarball = pkg.versions[version].dist.tarball
   has(pkg, null, function(err, hasPackage) {
     if (err) return done(err, pkg)
     if (!hasPackage) return done(err, pkg)
@@ -170,7 +169,6 @@ process
 
 function add(pkg, done) {
   if (argv.verbose) console.error('%d adding %s@%s', pkg.seq, pkg.name, pkg.version || '*')
-  var tarball = pkg.tarball
   var cmd = 'npm'
   var args = 'cache add '
   args += pkg.name
@@ -178,11 +176,11 @@ function add(pkg, done) {
   args += ' --silent '
   spawn(cmd, args.split(' '))
   .once('error', function(err) {
-    done(err, tarball)
+    done(err, pkg)
     done = noop
   })
   .once('close', function() {
-    done(null, tarball)
+    done(null, pkg)
     done = noop
   })
 }
